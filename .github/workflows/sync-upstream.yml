@@ -529,6 +529,7 @@ jobs:
               "scripts/manage.sh",
           }
           names = set()
+          members = {}
           with tarfile.open(archive, "r:gz") as package:
               for member in package.getmembers():
                   path = PurePosixPath(member.name)
@@ -547,10 +548,44 @@ jobs:
                       raise SystemExit(
                           f"generated or repository-owned package member: {name!r}"
                       )
+                  if not (member.isfile() or member.isdir() or member.issym()):
+                      raise SystemExit(f"unsupported package member: {name!r}")
+                  if member.issym():
+                      link = PurePosixPath(member.linkname)
+                      if link.is_absolute() or not link.parts:
+                          raise SystemExit(
+                              f"unsafe package symlink: {name!r} -> "
+                              f"{member.linkname!r}"
+                          )
+                      resolved_parts = []
+                      for part in (*PurePosixPath(name).parent.parts, *link.parts):
+                          if part in {"", "."}:
+                              continue
+                          if part == "..":
+                              if not resolved_parts:
+                                  raise SystemExit(
+                                      f"package symlink escapes archive: {name!r}"
+                                  )
+                              resolved_parts.pop()
+                          else:
+                              resolved_parts.append(part)
+                      if not resolved_parts or any(
+                          part in {".git", ".github"} for part in resolved_parts
+                      ):
+                          raise SystemExit(
+                              f"unsafe package symlink: {name!r} -> "
+                              f"{member.linkname!r}"
+                          )
+                  members[name] = member
 
           missing = sorted(required - names)
           if missing:
               raise SystemExit(f"package is missing required files: {missing}")
+          non_files = sorted(name for name in required if not members[name].isfile())
+          if non_files:
+              raise SystemExit(
+                  f"required package members are not regular files: {non_files}"
+              )
           PY
 
           make -C standalone clean
