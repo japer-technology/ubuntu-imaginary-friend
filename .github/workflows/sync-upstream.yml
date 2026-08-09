@@ -1,0 +1,397 @@
+name: Sync from ubuntu-zombie
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 */6 * * *"
+
+permissions: {}
+
+concurrency:
+  group: sync-imaginary-friend
+  cancel-in-progress: false
+
+env:
+  SOURCE_BRANCH: main
+  SOURCE_PATH: products/imaginary-friend
+  SOURCE_REPOSITORY: japer-technology/ubuntu-zombie
+
+jobs:
+  validate:
+    name: Validate upstream snapshot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+
+    steps:
+      - name: Resolve upstream snapshot
+        id: source
+        run: |
+          set -euo pipefail
+
+          git clone --branch "$SOURCE_BRANCH" --single-branch --depth=1 \
+            "https://github.com/${SOURCE_REPOSITORY}.git" upstream
+          source_sha="$(git -C upstream rev-parse HEAD)"
+          if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Upstream did not resolve to a full commit SHA."
+            exit 1
+          fi
+
+          echo "sha=$source_sha" >>"$GITHUB_OUTPUT"
+          echo "::notice title=Upstream snapshot::$source_sha"
+
+      - name: Verify product identity
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path("upstream") / os.environ["SOURCE_PATH"]
+          metadata = json.loads((root / "PRODUCT.json").read_text(encoding="utf-8"))
+          expected = {
+              "product_id": "imaginary-friend",
+              "source_root": os.environ["SOURCE_PATH"],
+          }
+          for field, value in expected.items():
+              if metadata.get(field) != value:
+                  raise SystemExit(
+                      f"unexpected PRODUCT.json {field}: {metadata.get(field)!r}"
+                  )
+
+          version = (root / "VERSION").read_text(encoding="utf-8").strip()
+          if re.fullmatch(r"[0-9]{4}(?:\.[0-9]{2}){5}", version) is None:
+              raise SystemExit(f"invalid Imaginary Friend version: {version!r}")
+
+          automation = root / ".github"
+          if automation.exists() or automation.is_symlink():
+              raise SystemExit("upstream product must not contain .github automation")
+          PY
+
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck
+
+      - name: Lint and test upstream product
+        run: |
+          set -euo pipefail
+
+          make -C "upstream/$SOURCE_PATH" lint PYTHON=python3
+          make -C "upstream/$SOURCE_PATH" test PYTHON=python3
+
+  sync:
+    name: Publish validated snapshot
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out exact validated snapshot
+        id: checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Validation returned an invalid commit SHA."
+            exit 1
+          fi
+
+          askpass="$(mktemp /tmp/imaginary-friend-askpass.XXXXXX)"
+          trap 'rm -f "$askpass"' EXIT
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\n" x-access-token ;;' \
+            '  *Password*) printf "%s\n" "$GH_TOKEN" ;;' \
+            'esac' >"$askpass"
+          chmod 0700 "$askpass"
+
+          GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+            git clone --single-branch \
+            "https://github.com/${GITHUB_REPOSITORY}.git" target
+
+          target_branch="$(git -C target branch --show-current)"
+          if [[ -z "$target_branch" ]]; then
+            echo "::error::Unable to resolve the target default branch."
+            exit 1
+          fi
+          git check-ref-format --branch "$target_branch" >/dev/null
+          echo "branch=$target_branch" >>"$GITHUB_OUTPUT"
+
+          git init upstream
+          git -C upstream remote add origin \
+            "https://github.com/${SOURCE_REPOSITORY}.git"
+          git -C upstream sparse-checkout init --cone
+          git -C upstream sparse-checkout set "$SOURCE_PATH"
+          git -C upstream fetch --depth=1 --filter=blob:none --no-tags \
+            origin "$SOURCE_SHA"
+          git -C upstream checkout --detach "$SOURCE_SHA"
+
+          checked_out_sha="$(git -C upstream rev-parse HEAD)"
+          if [[ "$checked_out_sha" != "$SOURCE_SHA" ]]; then
+            echo "::error::Checked-out source does not match validated source."
+            exit 1
+          fi
+
+      - name: Mirror product into repository root
+        env:
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          source_root="upstream/$SOURCE_PATH"
+          test -f "$source_root/PRODUCT.json"
+          test -f "$source_root/README.md"
+          test -f "$source_root/VERSION"
+          if [[ -e "$source_root/.github" || -L "$source_root/.github" ]]; then
+            echo "::error::Refusing to import upstream GitHub automation."
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path, PurePosixPath
+
+          source_path = os.environ["SOURCE_PATH"]
+          source_sha = os.environ["SOURCE_SHA"]
+          target = Path("target")
+          manifest = target / ".github" / "upstream-manifest.json"
+
+          tree = subprocess.run(
+              [
+                  "git",
+                  "-C",
+                  "upstream",
+                  "ls-tree",
+                  "-rz",
+                  source_sha,
+                  "--",
+                  source_path,
+              ],
+              check=True,
+              stdout=subprocess.PIPE,
+          ).stdout
+
+          prefix = f"{source_path.rstrip('/')}/"
+          current_files = []
+          for raw_entry in tree.split(b"\0"):
+              if not raw_entry:
+                  continue
+              metadata, raw_path = raw_entry.split(b"\t", 1)
+              mode, object_type, object_id = metadata.decode("ascii").split()
+              path = raw_path.decode("utf-8")
+              if object_type != "blob" or mode not in {"100644", "100755", "120000"}:
+                  raise SystemExit(
+                      f"unsupported {mode} {object_type} entry in product: {path!r}"
+                  )
+              if not path.startswith(prefix):
+                  raise SystemExit(f"path escaped product root: {path!r}")
+
+              relative = PurePosixPath(path.removeprefix(prefix))
+              if (
+                  relative.is_absolute()
+                  or not relative.parts
+                  or any(
+                      part in {"", ".", "..", ".git", ".github"}
+                      for part in relative.parts
+                  )
+              ):
+                  raise SystemExit(f"unsafe product path: {str(relative)!r}")
+
+              if mode == "120000":
+                  link_target = subprocess.check_output(
+                      ["git", "-C", "upstream", "cat-file", "blob", object_id]
+                  ).decode("utf-8")
+                  target_path = PurePosixPath(link_target)
+                  if target_path.is_absolute() or not target_path.parts:
+                      raise SystemExit(
+                          f"unsafe symlink target for {str(relative)!r}: "
+                          f"{link_target!r}"
+                      )
+
+                  resolved_parts = []
+                  for part in (*relative.parent.parts, *target_path.parts):
+                      if part in {"", "."}:
+                          continue
+                      if part == "..":
+                          if not resolved_parts:
+                              raise SystemExit(
+                                  f"symlink escapes product root: {str(relative)!r}"
+                              )
+                          resolved_parts.pop()
+                      else:
+                          resolved_parts.append(part)
+                  if not resolved_parts or any(
+                      part in {".git", ".github"} for part in resolved_parts
+                  ):
+                      raise SystemExit(
+                          f"unsafe symlink target for {str(relative)!r}: "
+                          f"{link_target!r}"
+                      )
+
+              current_files.append(str(relative))
+
+          if not current_files:
+              raise SystemExit("upstream product contains no tracked files")
+          if len(current_files) != len(set(current_files)):
+              raise SystemExit("upstream product contains duplicate paths")
+          current_files.sort()
+
+          previous_files = []
+          if manifest.exists():
+              previous = json.loads(manifest.read_text(encoding="utf-8"))
+              if (
+                  previous.get("schema_version") != 1
+                  or previous.get("source_repository")
+                  != os.environ["SOURCE_REPOSITORY"]
+                  or previous.get("source_path") != source_path
+                  or not isinstance(previous.get("files"), list)
+                  or not all(isinstance(path, str) for path in previous["files"])
+              ):
+                  raise SystemExit("existing upstream manifest is invalid")
+              previous_files = previous["files"]
+
+          def safe_relative_path(raw_path):
+              path = PurePosixPath(raw_path)
+              if (
+                  path.is_absolute()
+                  or not path.parts
+                  or any(
+                      part in {"", ".", "..", ".git", ".github"}
+                      for part in path.parts
+                  )
+              ):
+                  raise SystemExit(f"unsafe manifest path: {raw_path!r}")
+              return path
+
+          stale_files = sorted(
+              set(previous_files) - set(current_files),
+              key=lambda path: (len(PurePosixPath(path).parts), path),
+              reverse=True,
+          )
+          for raw_path in stale_files:
+              relative = safe_relative_path(raw_path)
+              candidate = target
+              for part in relative.parts:
+                  if candidate.is_symlink():
+                      raise SystemExit(
+                          f"refusing to traverse symlink while deleting {raw_path!r}"
+                      )
+                  candidate /= part
+
+              if candidate.is_symlink() or candidate.is_file():
+                  candidate.unlink()
+              elif candidate.exists():
+                  raise SystemExit(
+                      f"refusing to recursively delete directory {raw_path!r}"
+                  )
+
+              parent = candidate.parent
+              while parent != target:
+                  try:
+                      parent.rmdir()
+                  except OSError:
+                      break
+                  parent = parent.parent
+
+          source_tree = subprocess.check_output(
+              ["git", "-C", "upstream", "rev-parse", f"{source_sha}:{source_path}"],
+              text=True,
+          ).strip()
+          updated = {
+              "schema_version": 1,
+              "source_repository": os.environ["SOURCE_REPOSITORY"],
+              "source_path": source_path,
+              "source_tree": source_tree,
+              "files": current_files,
+          }
+          manifest.parent.mkdir(parents=True, exist_ok=True)
+          temporary_manifest = manifest.with_suffix(".json.tmp")
+          temporary_manifest.write_text(
+              json.dumps(updated, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          temporary_manifest.replace(manifest)
+          print(f"Removed {len(stale_files)} stale mirrored file(s).")
+          PY
+
+          rsync \
+            --archive \
+            --checksum \
+            --itemize-changes \
+            --exclude=/.git \
+            --exclude=/.github \
+            "$source_root/" target/
+
+      - name: Commit and push changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          TARGET_BRANCH: ${{ steps.checkout.outputs.branch }}
+        run: |
+          set -euo pipefail
+
+          git -C target add --all
+          if git -C target diff --cached --quiet; then
+            echo "Already synchronized with ubuntu-zombie."
+            echo "### Already synchronized" >>"$GITHUB_STEP_SUMMARY"
+            echo "Source commit: \`$SOURCE_SHA\`" >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          changed_file_count="$(
+            git -C target diff --cached --name-only | wc -l | tr -d ' '
+          )"
+          git -C target config user.name "github-actions[bot]"
+          git -C target config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C target commit \
+            -m "Sync Imaginary Friend from ubuntu-zombie@${SOURCE_SHA:0:12}" \
+            -m "Source: https://github.com/${SOURCE_REPOSITORY}/tree/${SOURCE_SHA}/${SOURCE_PATH}"
+
+          askpass="$(mktemp /tmp/imaginary-friend-askpass.XXXXXX)"
+          trap 'rm -f "$askpass"' EXIT
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\n" x-access-token ;;' \
+            '  *Password*) printf "%s\n" "$GH_TOKEN" ;;' \
+            'esac' >"$askpass"
+          chmod 0700 "$askpass"
+
+          pushed=false
+          for attempt in 1 2 3; do
+            GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+              git -C target fetch --no-tags origin \
+              "+refs/heads/$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH"
+            git -C target rebase "refs/remotes/origin/$TARGET_BRANCH"
+            if GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+              git -C target push \
+              origin "HEAD:refs/heads/$TARGET_BRANCH"; then
+              pushed=true
+              break
+            fi
+            if ((attempt < 3)); then
+              sleep "$((attempt * 2))"
+            fi
+          done
+          if [[ "$pushed" != true ]]; then
+            echo "::error::Unable to push after three attempts."
+            exit 1
+          fi
+
+          echo "### Synchronized Imaginary Friend" >>"$GITHUB_STEP_SUMMARY"
+          echo "Source commit: \`$SOURCE_SHA\`" >>"$GITHUB_STEP_SUMMARY"
+          echo "Changed files: $changed_file_count" >>"$GITHUB_STEP_SUMMARY"
