@@ -1,0 +1,77 @@
+name: Sync from ubuntu-zombie
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-imaginary-friend-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone repositories
+        env:
+          TARGET_BRANCH: ${{ github.ref_name }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          git clone --branch "$TARGET_BRANCH" --single-branch \
+            "https://github.com/$TARGET_REPOSITORY.git" target
+          git clone --depth=1 --filter=blob:none --sparse \
+            https://github.com/japer-technology/ubuntu-zombie.git upstream
+          git -C upstream sparse-checkout set products/imaginary-friend
+
+      - name: Sync product to repository root
+        run: |
+          set -euo pipefail
+
+          sync_workflow="$(mktemp)"
+          cp target/.github/workflows/sync-upstream.yml "$sync_workflow"
+          rsync --archive --delete --exclude=.git/ \
+            upstream/products/imaginary-friend/ target/
+          install -D -m 0644 \
+            "$sync_workflow" target/.github/workflows/sync-upstream.yml
+          rm "$sync_workflow"
+
+      - name: Commit and push changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          git -C target add --all
+          if git -C target diff --cached --quiet; then
+            echo "Already synchronized with ubuntu-zombie."
+            exit 0
+          fi
+
+          upstream_sha="$(git -C upstream rev-parse --short=12 HEAD)"
+          git -C target config user.name "github-actions[bot]"
+          git -C target config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C target commit \
+            -m "Sync imaginary-friend from ubuntu-zombie@$upstream_sha"
+
+          askpass="$(mktemp)"
+          trap 'rm -f "$askpass"' EXIT
+          cat >"$askpass" <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' x-access-token ;;
+            *Password*) printf '%s\n' "$GH_TOKEN" ;;
+          esac
+          EOF
+          chmod 0700 "$askpass"
+
+          GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+            git -C target push origin "HEAD:$TARGET_BRANCH"
