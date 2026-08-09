@@ -343,9 +343,10 @@ jobs:
           )
           replace(
               "UPSTREAM.md",
-              "It does not import or install code from the repository-root `payload/`.",
+              "It does not import or install code from the repository-root `payload/`."
+              "\n\n",
               "It does not import or install Ubuntu Zombie's root-level `payload/`; "
-              "the\n`payload/` in this repository belongs only to Imaginary Friend.",
+              "the\n`payload/` in this repository belongs only to Imaginary Friend.\n",
           )
           replace(
               "docs/README.md",

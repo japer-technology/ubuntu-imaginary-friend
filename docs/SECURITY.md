@@ -43,7 +43,7 @@ risk boundary.
 ## Security reporting
 
 Do not open a public issue for a suspected vulnerability. Follow the private
-reporting process in the
+reporting process in the repository
 [upstream security policy](https://github.com/japer-technology/ubuntu-zombie/security/policy), identify the affected product as
 Imaginary Friend, and include the product version and reproduction details
 without real conversation or workspace content.
