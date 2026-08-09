@@ -1,7 +1,7 @@
 # Security and threat model
 
 Read the normative
-[authority and boundary definition](../../../docs/ai-agent/imaginary-friend.md)
+[authority and boundary definition](https://github.com/japer-technology/ubuntu-zombie/blob/main/docs/ai-agent/imaginary-friend.md)
 before installation. This document describes the implemented first-release
 controls; it does not extend Friend's authority.
 
@@ -44,6 +44,6 @@ risk boundary.
 
 Do not open a public issue for a suspected vulnerability. Follow the private
 reporting process in the repository
-[`SECURITY.md`](../../../SECURITY.md), identify the affected product as
+[upstream security policy](https://github.com/japer-technology/ubuntu-zombie/security/policy), identify the affected product as
 Imaginary Friend, and include the product version and reproduction details
 without real conversation or workspace content.

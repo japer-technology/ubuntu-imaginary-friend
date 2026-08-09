@@ -3,7 +3,7 @@
 This directory contains the product-owned operating and assurance documents
 for Imaginary Friend. Start with the
 [product README](../README.md) and the normative
-[product definition](../../../docs/ai-agent/imaginary-friend.md).
+[product definition](https://github.com/japer-technology/ubuntu-zombie/blob/main/docs/ai-agent/imaginary-friend.md).
 
 | Question | Document |
 | -------- | -------- |

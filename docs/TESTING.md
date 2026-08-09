@@ -5,14 +5,15 @@
 Run from the repository root:
 
 ```bash
-make -C products/imaginary-friend lint
-make -C products/imaginary-friend test
-make -C products/imaginary-friend package
+make lint
+make test
+make package
 ```
 
 `lint` runs ShellCheck, Bash syntax checks, and Python compilation. `test`
-runs unit, hermetic integration, HTTP, lifecycle-contract, and shared family
-conformance suites. Model tests use
+runs unit, hermetic integration, HTTP, and lifecycle-contract suites. The
+upstream sync separately runs shared family conformance before publishing.
+Model tests use
 `tests/fixtures/openai_fixture.py`; they do not require a real model or
 external network.
 
@@ -43,7 +44,8 @@ loopback model.
 | Gate | Repository evidence | State |
 | ---- | ------------------- | ----- |
 | Product source and fixed slice | `payload/`, `PRODUCT.json`, product definition | Implemented |
-| Unit/integration/family tests | `tests/unit/`, `tests/integration/`, `tests/family/` | Automated |
+| Unit and integration tests | `tests/unit/`, `tests/integration/` | Automated |
+| Shared family conformance | [canonical upstream suite](https://github.com/japer-technology/ubuntu-zombie/tree/main/tests/family) | Automated before sync |
 | Standalone host lifecycle | `tests/vm/lifecycle.sh`, integration workflow | Requires recorded supported-VM pass per release |
 | Negative security boundary | policy, workspace, model, HTTP, asset, and VM tests | Implemented set; continued red-team review required |
 | Ubuntu Zombie-managed lifecycle | Common request/response/audit contract | Manager implementation gate open |

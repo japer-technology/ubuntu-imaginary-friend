@@ -3,14 +3,14 @@ SHELL := bash
 
 PYTHON ?= python3
 VERSION := $(shell cat VERSION)
-REPOSITORY_ROOT := ../..
+REPOSITORY_ROOT := .
 
 .PHONY: help lint test package clean
 
 help:
 	@echo "Targets:"
 	@echo "  lint     ShellCheck, bash syntax, and Python compile"
-	@echo "  test     unit, integration, and family conformance tests"
+	@echo "  test     unit and integration tests"
 	@echo "  package  independent Imaginary Friend source artifact"
 	@echo "  clean    remove generated artifacts and caches"
 
@@ -31,15 +31,13 @@ lint:
 test:
 	PYTHONPATH=payload/agent "$(PYTHON)" -m unittest discover -s tests/unit -p 'test_*.py'
 	PYTHONPATH=payload/agent "$(PYTHON)" -m unittest discover -s tests/integration -p 'test_*.py'
-	"$(PYTHON)" -m unittest discover -s "$(REPOSITORY_ROOT)/tests/family" -p 'test_*.py'
 
 package:
 	@mkdir -p dist
-	@tar --exclude-vcs --exclude='products/imaginary-friend/dist' \
+	@tar --exclude-vcs --exclude='./.github' --exclude='./dist' \
 	     --exclude='__pycache__' --exclude='*.pyc' \
 	     -czf "dist/imaginary-friend-$(VERSION).tar.gz" \
-	     -C "$(REPOSITORY_ROOT)" \
-	     products/imaginary-friend family/schemas LICENSE
+	     -C "$(REPOSITORY_ROOT)" .
 	@echo "Wrote dist/imaginary-friend-$(VERSION).tar.gz"
 
 clean:

@@ -6,5 +6,5 @@ Zombie tag `v2026.08.07.05.56.42`.
 No Ubuntu Zombie runtime file was copied. Imaginary Friend independently
 implements the applicable installer, authentication, policy, audit,
 lifecycle, SQLite, testing, and packaging outcomes below this product root.
-It does not import or install code from the repository-root `payload/`.
-
+It does not import or install Ubuntu Zombie's root-level `payload/`; the
+`payload/` in this repository belongs only to Imaginary Friend.

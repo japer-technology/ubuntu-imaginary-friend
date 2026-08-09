@@ -9,7 +9,7 @@ The standalone source and independent release machinery are implemented.
 Admission to Ubuntu Zombie's production family catalogue remains gated on the
 manager, disposable-VM, co-installation, and release-verification evidence
 described in the
-[product definition](../../docs/ai-agent/imaginary-friend.md).
+[product definition](https://github.com/japer-technology/ubuntu-zombie/blob/main/docs/ai-agent/imaginary-friend.md).
 
 ## Safety first
 
@@ -46,18 +46,18 @@ Ubuntu Zombie, can inspect its unencrypted local state.
   open family gates.
 
 The normative first-release behavior remains in
-[`docs/ai-agent/imaginary-friend.md`](../../docs/ai-agent/imaginary-friend.md);
+[`docs/ai-agent/imaginary-friend.md`](https://github.com/japer-technology/ubuntu-zombie/blob/main/docs/ai-agent/imaginary-friend.md);
 the shared machine-readable lifecycle contract is
-[`docs/ai-agent/implementation.md`](../../docs/ai-agent/implementation.md).
+[`docs/ai-agent/implementation.md`](https://github.com/japer-technology/ubuntu-zombie/blob/main/docs/ai-agent/implementation.md).
 
 ## Development
 
 From the repository root:
 
 ```bash
-make -C products/imaginary-friend lint
-make -C products/imaginary-friend test
-make -C products/imaginary-friend package
+make lint
+make test
+make package
 ```
 
 These commands do not install the product. Root lifecycle testing is guarded
