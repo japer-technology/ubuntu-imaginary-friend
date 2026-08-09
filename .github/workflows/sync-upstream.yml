@@ -107,6 +107,7 @@ jobs:
           fi
 
           askpass="$(mktemp /tmp/imaginary-friend-askpass.XXXXXX)"
+          trap 'rm -f "$askpass"' EXIT
           printf '%s\n' \
             '#!/bin/sh' \
             'case "$1" in' \
@@ -118,7 +119,6 @@ jobs:
           GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
             git clone --single-branch \
             "https://github.com/${GITHUB_REPOSITORY}.git" target
-          echo "askpass=$askpass" >>"$GITHUB_OUTPUT"
 
           target_branch="$(git -C target branch --show-current)"
           if [[ -z "$target_branch" ]]; then
@@ -190,7 +190,7 @@ jobs:
               if not raw_entry:
                   continue
               metadata, raw_path = raw_entry.split(b"\t", 1)
-              mode, object_type, _ = metadata.decode("ascii").split()
+              mode, object_type, object_id = metadata.decode("ascii").split()
               path = raw_path.decode("utf-8")
               if object_type != "blob" or mode not in {"100644", "100755", "120000"}:
                   raise SystemExit(
@@ -203,9 +203,44 @@ jobs:
               if (
                   relative.is_absolute()
                   or not relative.parts
-                  or any(part in {"", ".", "..", ".github"} for part in relative.parts)
+                  or any(
+                      part in {"", ".", "..", ".git", ".github"}
+                      for part in relative.parts
+                  )
               ):
                   raise SystemExit(f"unsafe product path: {str(relative)!r}")
+
+              if mode == "120000":
+                  link_target = subprocess.check_output(
+                      ["git", "-C", "upstream", "cat-file", "blob", object_id]
+                  ).decode("utf-8")
+                  target_path = PurePosixPath(link_target)
+                  if target_path.is_absolute() or not target_path.parts:
+                      raise SystemExit(
+                          f"unsafe symlink target for {str(relative)!r}: "
+                          f"{link_target!r}"
+                      )
+
+                  resolved_parts = []
+                  for part in (*relative.parent.parts, *target_path.parts):
+                      if part in {"", "."}:
+                          continue
+                      if part == "..":
+                          if not resolved_parts:
+                              raise SystemExit(
+                                  f"symlink escapes product root: {str(relative)!r}"
+                              )
+                          resolved_parts.pop()
+                      else:
+                          resolved_parts.append(part)
+                  if not resolved_parts or any(
+                      part in {".git", ".github"} for part in resolved_parts
+                  ):
+                      raise SystemExit(
+                          f"unsafe symlink target for {str(relative)!r}: "
+                          f"{link_target!r}"
+                      )
+
               current_files.append(str(relative))
 
           if not current_files:
@@ -233,7 +268,10 @@ jobs:
               if (
                   path.is_absolute()
                   or not path.parts
-                  or any(part in {"", ".", "..", ".github"} for part in path.parts)
+                  or any(
+                      part in {"", ".", "..", ".git", ".github"}
+                      for part in path.parts
+                  )
               ):
                   raise SystemExit(f"unsafe manifest path: {raw_path!r}")
               return path
@@ -299,13 +337,11 @@ jobs:
 
       - name: Commit and push changes
         env:
-          GIT_ASKPASS: ${{ steps.checkout.outputs.askpass }}
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
           TARGET_BRANCH: ${{ steps.checkout.outputs.branch }}
         run: |
           set -euo pipefail
-          trap 'rm -f "$GIT_ASKPASS"' EXIT
 
           git -C target add --all
           if git -C target diff --cached --quiet; then
@@ -325,12 +361,24 @@ jobs:
             -m "Sync Imaginary Friend from ubuntu-zombie@${SOURCE_SHA:0:12}" \
             -m "Source: https://github.com/${SOURCE_REPOSITORY}/tree/${SOURCE_SHA}/${SOURCE_PATH}"
 
+          askpass="$(mktemp /tmp/imaginary-friend-askpass.XXXXXX)"
+          trap 'rm -f "$askpass"' EXIT
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\n" x-access-token ;;' \
+            '  *Password*) printf "%s\n" "$GH_TOKEN" ;;' \
+            'esac' >"$askpass"
+          chmod 0700 "$askpass"
+
           pushed=false
           for attempt in 1 2 3; do
-            git -C target fetch --no-tags origin \
+            GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+              git -C target fetch --no-tags origin \
               "+refs/heads/$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH"
             git -C target rebase "refs/remotes/origin/$TARGET_BRANCH"
-            if GIT_TERMINAL_PROMPT=0 git -C target push \
+            if GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+              git -C target push \
               origin "HEAD:refs/heads/$TARGET_BRANCH"; then
               pushed=true
               break
