@@ -1,6 +1,7 @@
 {
   "files": [
     "CHANGELOG.md",
+    "LICENSE",
     "Makefile",
     "PRODUCT.json",
     "README.md",
@@ -18,6 +19,14 @@
     "docs/TROUBLESHOOTING.md",
     "docs/UPGRADING.md",
     "docs/VISION.md",
+    "family/schemas/audit-event-v1.schema.json",
+    "family/schemas/catalog-v1.schema.json",
+    "family/schemas/installation-v1.schema.json",
+    "family/schemas/inventory-v1.schema.json",
+    "family/schemas/product-v1.schema.json",
+    "family/schemas/receipt-v1.schema.json",
+    "family/schemas/request-v1.schema.json",
+    "family/schemas/response-v1.schema.json",
     "payload/agent/friend/__init__.py",
     "payload/agent/friend/application.py",
     "payload/agent/friend/audit.py",
@@ -51,8 +60,24 @@
     "tests/unit/test_workspace.py",
     "tests/vm/lifecycle.sh"
   ],
-  "schema_version": 1,
-  "source_path": "products/imaginary-friend",
+  "schema_version": 2,
   "source_repository": "japer-technology/ubuntu-zombie",
-  "source_tree": "90652d35d0349e4f8447196bf32b841445ce1335"
+  "sources": [
+    {
+      "object": "90652d35d0349e4f8447196bf32b841445ce1335",
+      "source_path": "products/imaginary-friend",
+      "target_path": "."
+    },
+    {
+      "object": "79a7fdfbb258d0c04a361e66c6f0981d0775ca09",
+      "source_path": "family/schemas",
+      "target_path": "family/schemas"
+    },
+    {
+      "object": "807beab46186fe214a75850f798785274654f0a4",
+      "source_path": "LICENSE",
+      "target_path": "LICENSE"
+    }
+  ],
+  "standalone_tree": "d1ccfee284d61341deeb953a549838674cec4c68"
 }

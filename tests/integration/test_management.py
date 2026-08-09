@@ -6,8 +6,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[4]
-MANAGE = ROOT / "products" / "imaginary-friend" / "scripts" / "manage.sh"
+ROOT = Path(__file__).resolve().parents[2]
+MANAGE = ROOT / "scripts" / "manage.sh"
 
 
 class ManagementTests(unittest.TestCase):

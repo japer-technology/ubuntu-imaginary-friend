@@ -18,11 +18,12 @@ env:
 
 jobs:
   validate:
-    name: Validate upstream snapshot
+    name: Validate upstream distribution
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
+      standalone_tree: ${{ steps.standalone.outputs.tree }}
 
     steps:
       - name: Resolve upstream snapshot
@@ -38,10 +39,11 @@ jobs:
             exit 1
           fi
 
+          printf '%s\n' "$source_sha" >source-sha
           echo "sha=$source_sha" >>"$GITHUB_OUTPUT"
           echo "::notice title=Upstream snapshot::$source_sha"
 
-      - name: Verify product identity
+      - name: Verify distribution identity
         run: |
           set -euo pipefail
 
@@ -51,7 +53,8 @@ jobs:
           import re
           from pathlib import Path
 
-          root = Path("upstream") / os.environ["SOURCE_PATH"]
+          upstream = Path("upstream")
+          root = upstream / os.environ["SOURCE_PATH"]
           metadata = json.loads((root / "PRODUCT.json").read_text(encoding="utf-8"))
           expected = {
               "product_id": "imaginary-friend",
@@ -70,6 +73,10 @@ jobs:
           automation = root / ".github"
           if automation.exists() or automation.is_symlink():
               raise SystemExit("upstream product must not contain .github automation")
+          if not (upstream / "LICENSE").is_file():
+              raise SystemExit("upstream repository license is missing")
+          if not (upstream / "family" / "schemas").is_dir():
+              raise SystemExit("upstream family schemas are missing")
           PY
 
       - name: Install validation tools
@@ -77,15 +84,478 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends shellcheck
 
-      - name: Lint and test upstream product
+      - name: Validate canonical product
         run: |
           set -euo pipefail
 
           make -C "upstream/$SOURCE_PATH" lint PYTHON=python3
           make -C "upstream/$SOURCE_PATH" test PYTHON=python3
+          make -C "upstream/$SOURCE_PATH" package
+          make -C "upstream/$SOURCE_PATH" clean
+
+      - &prepare-standalone
+        name: Prepare standalone distribution
+        id: standalone
+        run: |
+          set -euo pipefail
+
+          rm -rf standalone snapshot-metadata.json
+          mkdir standalone
+
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path, PurePosixPath
+          from urllib.parse import unquote, urlsplit
+
+          upstream = Path("upstream")
+          output = Path("standalone")
+          source_sha = Path("source-sha").read_text(encoding="utf-8").strip()
+          if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+              raise SystemExit("source-sha does not contain a full commit SHA")
+
+          imports = (
+              (
+                  PurePosixPath(os.environ["SOURCE_PATH"]),
+                  PurePosixPath("."),
+                  "tree",
+              ),
+              (
+                  PurePosixPath("family/schemas"),
+                  PurePosixPath("family/schemas"),
+                  "tree",
+              ),
+              (
+                  PurePosixPath("LICENSE"),
+                  PurePosixPath("LICENSE"),
+                  "blob",
+              ),
+          )
+          entries = {}
+          sources = []
+
+          def checked_output(*arguments):
+              return subprocess.check_output(
+                  ["git", "-C", str(upstream), *arguments]
+              )
+
+          def safe_target(path):
+              if (
+                  path.is_absolute()
+                  or not path.parts
+                  or any(
+                      part in {"", ".", "..", ".git", ".github"}
+                      for part in path.parts
+                  )
+              ):
+                  raise SystemExit(f"unsafe standalone path: {str(path)!r}")
+
+          for source, target, expected_type in imports:
+              source_name = str(source)
+              object_id = checked_output(
+                  "rev-parse", f"{source_sha}:{source_name}"
+              ).decode("ascii").strip()
+              object_type = checked_output(
+                  "cat-file", "-t", object_id
+              ).decode("ascii").strip()
+              if object_type != expected_type:
+                  raise SystemExit(
+                      f"expected {source_name!r} to be a {expected_type}, "
+                      f"found {object_type!r}"
+                  )
+
+              tree = subprocess.run(
+                  [
+                      "git",
+                      "-C",
+                      str(upstream),
+                      "ls-tree",
+                      "-rz",
+                      source_sha,
+                      "--",
+                      source_name,
+                  ],
+                  check=True,
+                  stdout=subprocess.PIPE,
+              ).stdout
+              imported_count = 0
+              prefix = f"{source_name.rstrip('/')}/"
+              for raw_entry in tree.split(b"\0"):
+                  if not raw_entry:
+                      continue
+                  metadata, raw_path = raw_entry.split(b"\t", 1)
+                  mode, entry_type, entry_id = metadata.decode("ascii").split()
+                  path = raw_path.decode("utf-8")
+                  if entry_type != "blob" or mode not in {"100644", "100755", "120000"}:
+                      raise SystemExit(
+                          f"unsupported {mode} {entry_type} entry: {path!r}"
+                      )
+
+                  if path == source_name:
+                      within = PurePosixPath()
+                  elif path.startswith(prefix):
+                      within = PurePosixPath(path.removeprefix(prefix))
+                  else:
+                      raise SystemExit(f"path escaped import root: {path!r}")
+
+                  relative = target / within if within.parts else target
+                  safe_target(relative)
+                  relative_name = str(relative)
+                  if relative_name in entries:
+                      raise SystemExit(
+                          f"duplicate standalone path: {relative_name!r}"
+                      )
+
+                  blob = checked_output("cat-file", "blob", entry_id)
+                  if mode == "120000":
+                      link_target = blob.decode("utf-8")
+                      target_path = PurePosixPath(link_target)
+                      if target_path.is_absolute() or not target_path.parts:
+                          raise SystemExit(
+                              f"unsafe symlink target for {relative_name!r}: "
+                              f"{link_target!r}"
+                          )
+
+                      resolved_parts = []
+                      for part in (*relative.parent.parts, *target_path.parts):
+                          if part in {"", "."}:
+                              continue
+                          if part == "..":
+                              if not resolved_parts:
+                                  raise SystemExit(
+                                      f"symlink escapes snapshot: {relative_name!r}"
+                                  )
+                              resolved_parts.pop()
+                          else:
+                              resolved_parts.append(part)
+                      if not resolved_parts or any(
+                          part in {".git", ".github"} for part in resolved_parts
+                      ):
+                          raise SystemExit(
+                              f"unsafe symlink target for {relative_name!r}: "
+                              f"{link_target!r}"
+                          )
+
+                  entries[relative_name] = (mode, entry_id, blob)
+                  imported_count += 1
+
+              if imported_count == 0:
+                  raise SystemExit(f"upstream import is empty: {source_name!r}")
+              sources.append(
+                  {
+                      "object": object_id,
+                      "source_path": source_name,
+                      "target_path": str(target),
+                  }
+              )
+
+          paths = set(entries)
+          for raw_path in paths:
+              path = PurePosixPath(raw_path)
+              for parent in path.parents:
+                  parent_name = str(parent)
+                  if parent_name == ".":
+                      break
+                  if parent_name in paths:
+                      raise SystemExit(
+                          f"standalone path collides with file: {raw_path!r}"
+                      )
+
+          for raw_path in sorted(entries):
+              mode, _, blob = entries[raw_path]
+              destination = output.joinpath(*PurePosixPath(raw_path).parts)
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              if mode == "120000":
+                  destination.symlink_to(blob.decode("utf-8"))
+              else:
+                  destination.write_bytes(blob)
+                  destination.chmod(0o755 if mode == "100755" else 0o644)
+
+          def replace(relative, old, new, expected=1):
+              path = output / relative
+              text = path.read_text(encoding="utf-8")
+              actual = text.count(old)
+              if actual != expected:
+                  raise SystemExit(
+                      f"{relative}: expected {expected} occurrence(s) of "
+                      f"{old!r}, found {actual}"
+                  )
+              path.write_text(text.replace(old, new), encoding="utf-8")
+
+          replace("Makefile", "  test     unit, integration, and family conformance tests",
+                  "  test     unit and integration tests")
+          replace("Makefile", "REPOSITORY_ROOT := ../..", "REPOSITORY_ROOT := .")
+          replace(
+              "Makefile",
+              '\t"$(PYTHON)" -m unittest discover -s "$(REPOSITORY_ROOT)/tests/family" '
+              "-p 'test_*.py'\n",
+              "",
+          )
+          replace(
+              "Makefile",
+              "\t@tar --exclude-vcs --exclude='products/imaginary-friend/dist' \\\n"
+              "\t     --exclude='__pycache__' --exclude='*.pyc' \\\n"
+              '\t     -czf "dist/imaginary-friend-$(VERSION).tar.gz" \\\n'
+              '\t     -C "$(REPOSITORY_ROOT)" \\\n'
+              "\t     products/imaginary-friend family/schemas LICENSE\n",
+              "\t@tar --exclude-vcs --exclude='./.github' --exclude='./dist' \\\n"
+              "\t     --exclude='__pycache__' --exclude='*.pyc' \\\n"
+              '\t     -czf "dist/imaginary-friend-$(VERSION).tar.gz" \\\n'
+              '\t     -C "$(REPOSITORY_ROOT)" .\n',
+          )
+
+          replace(
+              "tests/integration/test_management.py",
+              'ROOT = Path(__file__).resolve().parents[4]\n'
+              'MANAGE = ROOT / "products" / "imaginary-friend" / "scripts" / '
+              '"manage.sh"',
+              'ROOT = Path(__file__).resolve().parents[2]\n'
+              'MANAGE = ROOT / "scripts" / "manage.sh"',
+          )
+
+          definition_url = (
+              "https://github.com/japer-technology/ubuntu-zombie/blob/main/"
+              "docs/ai-agent/imaginary-friend.md"
+          )
+          implementation_url = (
+              "https://github.com/japer-technology/ubuntu-zombie/blob/main/"
+              "docs/ai-agent/implementation.md"
+          )
+          replace(
+              "README.md",
+              "(../../docs/ai-agent/imaginary-friend.md)",
+              f"({definition_url})",
+              expected=2,
+          )
+          replace(
+              "README.md",
+              "(../../docs/ai-agent/implementation.md)",
+              f"({implementation_url})",
+          )
+          replace(
+              "README.md",
+              "make -C products/imaginary-friend lint\n"
+              "make -C products/imaginary-friend test\n"
+              "make -C products/imaginary-friend package",
+              "make lint\nmake test\nmake package",
+          )
+          replace(
+              "UPSTREAM.md",
+              "It does not import or install code from the repository-root `payload/`.",
+              "It does not import or install Ubuntu Zombie's root-level `payload/`; "
+              "the\n`payload/` in this repository belongs only to Imaginary Friend.",
+          )
+          replace(
+              "docs/README.md",
+              "(../../../docs/ai-agent/imaginary-friend.md)",
+              f"({definition_url})",
+          )
+          replace(
+              "docs/SECURITY.md",
+              "(../../../docs/ai-agent/imaginary-friend.md)",
+              f"({definition_url})",
+          )
+          replace(
+              "docs/SECURITY.md",
+              "[`SECURITY.md`](../../../SECURITY.md)",
+              "[upstream security policy]"
+              "(https://github.com/japer-technology/ubuntu-zombie/security/policy)",
+          )
+          replace(
+              "docs/INSTALLATION.md",
+              "products/imaginary-friend/scripts/manage.sh",
+              "scripts/manage.sh",
+              expected=4,
+          )
+          replace(
+              "docs/TESTING.md",
+              "make -C products/imaginary-friend lint\n"
+              "make -C products/imaginary-friend test\n"
+              "make -C products/imaginary-friend package",
+              "make lint\nmake test\nmake package",
+          )
+          replace(
+              "docs/TESTING.md",
+              "`lint` runs ShellCheck, Bash syntax checks, and Python compilation. `test`\n"
+              "runs unit, hermetic integration, HTTP, lifecycle-contract, and shared "
+              "family\nconformance suites. Model tests use\n",
+              "`lint` runs ShellCheck, Bash syntax checks, and Python compilation. `test`\n"
+              "runs unit, hermetic integration, HTTP, and lifecycle-contract suites. "
+              "The\nupstream sync separately runs shared family conformance before "
+              "publishing.\nModel tests use\n",
+          )
+          replace(
+              "docs/TESTING.md",
+              "| Unit/integration/family tests | `tests/unit/`, `tests/integration/`, "
+              "`tests/family/` | Automated |",
+              "| Unit and integration tests | `tests/unit/`, `tests/integration/` | "
+              "Automated |\n"
+              "| Shared family conformance | "
+              "[canonical upstream suite]"
+              "(https://github.com/japer-technology/ubuntu-zombie/tree/main/tests/family) "
+              "| Automated before sync |",
+          )
+          replace(
+              "docs/RELEASE.md",
+              "The artifact contains only `products/imaginary-friend/`, the applicable\n"
+              "`family/schemas/`, and the repository license. The pinned workflow in\n"
+              "`.github/workflows/imaginary-friend-release.yml` validates and packages "
+              "the\nproduct, generates its SBOM and checksums, attests and signs assets, "
+              "and\npublishes the product tag.",
+              "The standalone artifact contains the application tree at its root, the\n"
+              "applicable `family/schemas/`, and `LICENSE`. The pinned\n"
+              "[upstream release workflow]"
+              "(https://github.com/japer-technology/ubuntu-zombie/blob/main/"
+              ".github/workflows/imaginary-friend-release.yml) validates and packages\n"
+              "the product, generates its SBOM and checksums, attests and signs assets,\n"
+              "and publishes the product tag.",
+          )
+
+          forbidden = {
+              "Makefile": (
+                  "REPOSITORY_ROOT := ../..",
+                  "tests/family",
+                  "products/imaginary-friend family/schemas LICENSE",
+              ),
+              "README.md": (
+                  "../../docs/ai-agent",
+                  "make -C products/imaginary-friend",
+              ),
+              "docs/README.md": ("../../../docs/ai-agent",),
+              "docs/SECURITY.md": (
+                  "../../../docs/ai-agent",
+                  "../../../SECURITY.md",
+              ),
+              "docs/INSTALLATION.md": (
+                  "products/imaginary-friend/scripts/manage.sh",
+              ),
+              "docs/TESTING.md": ("make -C products/imaginary-friend",),
+              "tests/integration/test_management.py": (
+                  "parents[4]",
+                  '"products" / "imaginary-friend"',
+              ),
+          }
+          for relative, tokens in forbidden.items():
+              text = (output / relative).read_text(encoding="utf-8")
+              for token in tokens:
+                  if token in text:
+                      raise SystemExit(
+                          f"{relative}: standalone-incompatible token remains: {token!r}"
+                      )
+
+          link_pattern = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
+          output_root = output.resolve()
+          for document in sorted(output.rglob("*.md")):
+              text = document.read_text(encoding="utf-8")
+              for raw_target in link_pattern.findall(text):
+                  target = raw_target.strip().split(maxsplit=1)[0]
+                  if target.startswith("<") and target.endswith(">"):
+                      target = target[1:-1]
+                  parsed = urlsplit(target)
+                  if parsed.scheme or target.startswith("#"):
+                      continue
+                  if parsed.netloc or parsed.path.startswith("/"):
+                      raise SystemExit(
+                          f"{document}: unsupported Markdown link: {raw_target!r}"
+                      )
+                  path_text = unquote(parsed.path)
+                  if not path_text:
+                      continue
+                  candidate = (document.parent / path_text).resolve()
+                  try:
+                      candidate.relative_to(output_root)
+                  except ValueError as exc:
+                      raise SystemExit(
+                          f"{document}: link escapes standalone snapshot: "
+                          f"{raw_target!r}"
+                      ) from exc
+                  if not candidate.exists():
+                      raise SystemExit(
+                          f"{document}: broken local link: {raw_target!r}"
+                      )
+
+          subprocess.run(["git", "-C", str(output), "init", "-q"], check=True)
+          subprocess.run(["git", "-C", str(output), "add", "--all"], check=True)
+          standalone_tree = subprocess.check_output(
+              ["git", "-C", str(output), "write-tree"],
+              text=True,
+          ).strip()
+          if re.fullmatch(r"[0-9a-f]{40}", standalone_tree) is None:
+              raise SystemExit("standalone snapshot did not produce a Git tree")
+
+          metadata = {
+              "files": sorted(entries),
+              "schema_version": 2,
+              "source_repository": os.environ["SOURCE_REPOSITORY"],
+              "sources": sources,
+              "standalone_tree": standalone_tree,
+          }
+          metadata_path = Path("snapshot-metadata.json")
+          metadata_path.write_text(
+              json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output_file:
+              output_file.write(f"tree={standalone_tree}\n")
+          print(
+              f"Prepared {len(entries)} files in standalone tree {standalone_tree}."
+          )
+          PY
+
+      - name: Validate standalone distribution
+        run: |
+          set -euo pipefail
+
+          make -C standalone lint PYTHON=python3
+          make -C standalone test PYTHON=python3
+          make -C standalone package
+
+          python3 - <<'PY'
+          import tarfile
+          from pathlib import Path, PurePosixPath
+
+          version = Path("standalone/VERSION").read_text(encoding="utf-8").strip()
+          archive = (
+              Path("standalone/dist") / f"imaginary-friend-{version}.tar.gz"
+          )
+          required = {
+              "LICENSE",
+              "PRODUCT.json",
+              "family/schemas/product-v1.schema.json",
+              "payload/agent/friend/application.py",
+              "scripts/manage.sh",
+          }
+          names = set()
+          with tarfile.open(archive, "r:gz") as package:
+              for member in package.getmembers():
+                  path = PurePosixPath(member.name)
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(f"unsafe package member: {member.name!r}")
+                  parts = tuple(part for part in path.parts if part != ".")
+                  if not parts:
+                      continue
+                  name = str(PurePosixPath(*parts))
+                  names.add(name)
+                  if (
+                      parts[0] in {".git", ".github", "dist"}
+                      or "__pycache__" in parts
+                      or name.endswith(".pyc")
+                  ):
+                      raise SystemExit(
+                          f"generated or repository-owned package member: {name!r}"
+                      )
+
+          missing = sorted(required - names)
+          if missing:
+              raise SystemExit(f"package is missing required files: {missing}")
+          PY
+
+          make -C standalone clean
 
   sync:
-    name: Publish validated snapshot
+    name: Publish validated distribution
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -93,7 +563,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Check out exact validated snapshot
+      - name: Check out exact validated source and target
         id: checkout
         env:
           GH_TOKEN: ${{ github.token }}
@@ -132,7 +602,7 @@ jobs:
           git -C upstream remote add origin \
             "https://github.com/${SOURCE_REPOSITORY}.git"
           git -C upstream sparse-checkout init --cone
-          git -C upstream sparse-checkout set "$SOURCE_PATH"
+          git -C upstream sparse-checkout set "$SOURCE_PATH" family/schemas
           git -C upstream fetch --depth=1 --filter=blob:none --no-tags \
             origin "$SOURCE_SHA"
           git -C upstream checkout --detach "$SOURCE_SHA"
@@ -142,126 +612,44 @@ jobs:
             echo "::error::Checked-out source does not match validated source."
             exit 1
           fi
+          printf '%s\n' "$SOURCE_SHA" >source-sha
 
-      - name: Mirror product into repository root
+      - *prepare-standalone
+
+      - name: Verify validated standalone snapshot
         env:
-          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          EXPECTED_TREE: ${{ needs.validate.outputs.standalone_tree }}
+          PREPARED_TREE: ${{ steps.standalone.outputs.tree }}
         run: |
           set -euo pipefail
 
-          source_root="upstream/$SOURCE_PATH"
-          test -f "$source_root/PRODUCT.json"
-          test -f "$source_root/README.md"
-          test -f "$source_root/VERSION"
-          if [[ -e "$source_root/.github" || -L "$source_root/.github" ]]; then
-            echo "::error::Refusing to import upstream GitHub automation."
+          if [[ ! "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Validation returned an invalid standalone tree."
             exit 1
           fi
+          if [[ "$PREPARED_TREE" != "$EXPECTED_TREE" ]]; then
+            echo "::error::Prepared snapshot does not match validated snapshot."
+            echo "Expected: $EXPECTED_TREE"
+            echo "Prepared: $PREPARED_TREE"
+            exit 1
+          fi
+
+      - name: Mirror standalone distribution into repository root
+        env:
+          EXPECTED_TREE: ${{ needs.validate.outputs.standalone_tree }}
+        run: |
+          set -euo pipefail
 
           python3 - <<'PY'
           import json
           import os
-          import subprocess
+          import re
           from pathlib import Path, PurePosixPath
 
-          source_path = os.environ["SOURCE_PATH"]
-          source_sha = os.environ["SOURCE_SHA"]
           target = Path("target")
           manifest = target / ".github" / "upstream-manifest.json"
-
-          tree = subprocess.run(
-              [
-                  "git",
-                  "-C",
-                  "upstream",
-                  "ls-tree",
-                  "-rz",
-                  source_sha,
-                  "--",
-                  source_path,
-              ],
-              check=True,
-              stdout=subprocess.PIPE,
-          ).stdout
-
-          prefix = f"{source_path.rstrip('/')}/"
-          current_files = []
-          for raw_entry in tree.split(b"\0"):
-              if not raw_entry:
-                  continue
-              metadata, raw_path = raw_entry.split(b"\t", 1)
-              mode, object_type, object_id = metadata.decode("ascii").split()
-              path = raw_path.decode("utf-8")
-              if object_type != "blob" or mode not in {"100644", "100755", "120000"}:
-                  raise SystemExit(
-                      f"unsupported {mode} {object_type} entry in product: {path!r}"
-                  )
-              if not path.startswith(prefix):
-                  raise SystemExit(f"path escaped product root: {path!r}")
-
-              relative = PurePosixPath(path.removeprefix(prefix))
-              if (
-                  relative.is_absolute()
-                  or not relative.parts
-                  or any(
-                      part in {"", ".", "..", ".git", ".github"}
-                      for part in relative.parts
-                  )
-              ):
-                  raise SystemExit(f"unsafe product path: {str(relative)!r}")
-
-              if mode == "120000":
-                  link_target = subprocess.check_output(
-                      ["git", "-C", "upstream", "cat-file", "blob", object_id]
-                  ).decode("utf-8")
-                  target_path = PurePosixPath(link_target)
-                  if target_path.is_absolute() or not target_path.parts:
-                      raise SystemExit(
-                          f"unsafe symlink target for {str(relative)!r}: "
-                          f"{link_target!r}"
-                      )
-
-                  resolved_parts = []
-                  for part in (*relative.parent.parts, *target_path.parts):
-                      if part in {"", "."}:
-                          continue
-                      if part == "..":
-                          if not resolved_parts:
-                              raise SystemExit(
-                                  f"symlink escapes product root: {str(relative)!r}"
-                              )
-                          resolved_parts.pop()
-                      else:
-                          resolved_parts.append(part)
-                  if not resolved_parts or any(
-                      part in {".git", ".github"} for part in resolved_parts
-                  ):
-                      raise SystemExit(
-                          f"unsafe symlink target for {str(relative)!r}: "
-                          f"{link_target!r}"
-                      )
-
-              current_files.append(str(relative))
-
-          if not current_files:
-              raise SystemExit("upstream product contains no tracked files")
-          if len(current_files) != len(set(current_files)):
-              raise SystemExit("upstream product contains duplicate paths")
-          current_files.sort()
-
-          previous_files = []
-          if manifest.exists():
-              previous = json.loads(manifest.read_text(encoding="utf-8"))
-              if (
-                  previous.get("schema_version") != 1
-                  or previous.get("source_repository")
-                  != os.environ["SOURCE_REPOSITORY"]
-                  or previous.get("source_path") != source_path
-                  or not isinstance(previous.get("files"), list)
-                  or not all(isinstance(path, str) for path in previous["files"])
-              ):
-                  raise SystemExit("existing upstream manifest is invalid")
-              previous_files = previous["files"]
+          metadata_path = Path("snapshot-metadata.json")
+          metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 
           def safe_relative_path(raw_path):
               path = PurePosixPath(raw_path)
@@ -275,6 +663,70 @@ jobs:
               ):
                   raise SystemExit(f"unsafe manifest path: {raw_path!r}")
               return path
+
+          if (
+              metadata.get("schema_version") != 2
+              or metadata.get("source_repository")
+              != os.environ["SOURCE_REPOSITORY"]
+              or metadata.get("standalone_tree") != os.environ["EXPECTED_TREE"]
+              or re.fullmatch(
+                  r"[0-9a-f]{40}", str(metadata.get("standalone_tree", ""))
+              )
+              is None
+              or not isinstance(metadata.get("files"), list)
+              or metadata["files"] != sorted(set(metadata["files"]))
+              or not all(isinstance(path, str) for path in metadata["files"])
+          ):
+              raise SystemExit("prepared upstream manifest is invalid")
+
+          expected_sources = (
+              (os.environ["SOURCE_PATH"], "."),
+              ("family/schemas", "family/schemas"),
+              ("LICENSE", "LICENSE"),
+          )
+          sources = metadata.get("sources")
+          if not isinstance(sources, list) or len(sources) != len(expected_sources):
+              raise SystemExit("prepared upstream sources are invalid")
+          for source, expected in zip(sources, expected_sources, strict=True):
+              if (
+                  not isinstance(source, dict)
+                  or source.get("source_path") != expected[0]
+                  or source.get("target_path") != expected[1]
+                  or re.fullmatch(r"[0-9a-f]{40}", str(source.get("object", "")))
+                  is None
+              ):
+                  raise SystemExit("prepared upstream source is invalid")
+
+          current_files = metadata["files"]
+          for raw_path in current_files:
+              relative = safe_relative_path(raw_path)
+              candidate = target
+              for part in relative.parts[:-1]:
+                  candidate /= part
+                  if candidate.is_symlink():
+                      raise SystemExit(
+                          f"refusing to traverse symlink while updating {raw_path!r}"
+                      )
+
+          previous_files = []
+          if manifest.exists():
+              previous = json.loads(manifest.read_text(encoding="utf-8"))
+              schema_version = previous.get("schema_version")
+              if (
+                  previous.get("source_repository")
+                  != os.environ["SOURCE_REPOSITORY"]
+                  or not isinstance(previous.get("files"), list)
+                  or not all(
+                      isinstance(path, str) for path in previous.get("files", [])
+                  )
+              ):
+                  raise SystemExit("existing upstream manifest is invalid")
+              if schema_version == 1:
+                  if previous.get("source_path") != os.environ["SOURCE_PATH"]:
+                      raise SystemExit("existing upstream manifest is invalid")
+              elif schema_version != 2:
+                  raise SystemExit("existing upstream manifest is invalid")
+              previous_files = previous["files"]
 
           stale_files = sorted(
               set(previous_files) - set(current_files),
@@ -306,24 +758,6 @@ jobs:
                       break
                   parent = parent.parent
 
-          source_tree = subprocess.check_output(
-              ["git", "-C", "upstream", "rev-parse", f"{source_sha}:{source_path}"],
-              text=True,
-          ).strip()
-          updated = {
-              "schema_version": 1,
-              "source_repository": os.environ["SOURCE_REPOSITORY"],
-              "source_path": source_path,
-              "source_tree": source_tree,
-              "files": current_files,
-          }
-          manifest.parent.mkdir(parents=True, exist_ok=True)
-          temporary_manifest = manifest.with_suffix(".json.tmp")
-          temporary_manifest.write_text(
-              json.dumps(updated, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          temporary_manifest.replace(manifest)
           print(f"Removed {len(stale_files)} stale mirrored file(s).")
           PY
 
@@ -333,7 +767,13 @@ jobs:
             --itemize-changes \
             --exclude=/.git \
             --exclude=/.github \
-            "$source_root/" target/
+            standalone/ target/
+
+          install -d -m 0755 target/.github
+          cp snapshot-metadata.json target/.github/upstream-manifest.json.tmp
+          mv \
+            target/.github/upstream-manifest.json.tmp \
+            target/.github/upstream-manifest.json
 
       - name: Commit and push changes
         env:

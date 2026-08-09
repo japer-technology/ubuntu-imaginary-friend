@@ -15,11 +15,11 @@ Zombie release does not change the Friend version.
 | Signatures | Keyless cosign bundle, signature, and certificate for each asset |
 | Test evidence | Product/version/commit JSON generated after lint, tests, and packaging |
 
-The artifact contains only `products/imaginary-friend/`, the applicable
-`family/schemas/`, and the repository license. The pinned workflow in
-`.github/workflows/imaginary-friend-release.yml` validates and packages the
-product, generates its SBOM and checksums, attests and signs assets, and
-publishes the product tag.
+The standalone artifact contains the application tree at its root, the
+applicable `family/schemas/`, and `LICENSE`. The pinned
+[upstream release workflow](https://github.com/japer-technology/ubuntu-zombie/blob/main/.github/workflows/imaginary-friend-release.yml) validates and packages
+the product, generates its SBOM and checksums, attests and signs assets,
+and publishes the product tag.
 
 Before installation, verify that the tag matches `VERSION`, every downloaded
 asset matches the checksum manifest, the attestation subject matches the

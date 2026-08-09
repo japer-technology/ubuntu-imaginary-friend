@@ -10,8 +10,8 @@ identities, groups, systemd, `/opt`, `/etc`, `/var`, `/srv`, and
 From a verified release checkout:
 
 ```bash
-products/imaginary-friend/scripts/manage.sh describe --json
-products/imaginary-friend/scripts/manage.sh install --dry-run --json
+scripts/manage.sh describe --json
+scripts/manage.sh install --dry-run --json
 ```
 
 A dry-run creates no lock, credential, log, directory, download, or network
@@ -36,7 +36,7 @@ sudo env \
   FRIEND_OWNER_PASSWORD_FILE=/root/friend-owner-password \
   FRIEND_MODEL_BASE_URL=http://127.0.0.1:8080/v1 \
   FRIEND_MODEL=local-model-id \
-  products/imaginary-friend/scripts/manage.sh install --dry-run --json
+  scripts/manage.sh install --dry-run --json
 
 sudo env \
   FRIEND_NONINTERACTIVE=1 \
@@ -44,7 +44,7 @@ sudo env \
   FRIEND_OWNER_PASSWORD_FILE=/root/friend-owner-password \
   FRIEND_MODEL_BASE_URL=http://127.0.0.1:8080/v1 \
   FRIEND_MODEL=local-model-id \
-  products/imaginary-friend/scripts/manage.sh install --yes --json
+  scripts/manage.sh install --yes --json
 ```
 
 The model must answer bounded `/models` and `/chat/completions` probes before
