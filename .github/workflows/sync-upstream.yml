@@ -64,13 +64,12 @@ jobs:
 
           askpass="$(mktemp)"
           trap 'rm -f "$askpass"' EXIT
-          cat >"$askpass" <<'EOF'
-          #!/bin/sh
-          case "$1" in
-            *Username*) printf '%s\n' x-access-token ;;
-            *Password*) printf '%s\n' "$GH_TOKEN" ;;
-          esac
-          EOF
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\n" x-access-token ;;' \
+            '  *Password*) printf "%s\n" "$GH_TOKEN" ;;' \
+            'esac' >"$askpass"
           chmod 0700 "$askpass"
 
           GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
