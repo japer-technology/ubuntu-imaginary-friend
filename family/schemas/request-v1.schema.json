@@ -22,7 +22,8 @@
         "imaginary-friend",
         "curriculum-flame",
         "eric",
-        "llama"
+        "llama",
+        "beep"
       ]
     },
     "operation": {
@@ -34,7 +35,8 @@
     "requested_by": {
       "enum": [
         "operator",
-        "ubuntu-zombie"
+        "ubuntu-zombie",
+        "beep"
       ]
     },
     "inputs": {
@@ -67,10 +69,46 @@
           "retain_state"
         ]
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "product_id": {
+            "const": "beep"
+          }
+        },
+        "required": [
+          "product_id"
+        ]
+      },
+      "else": {
+        "properties": {
+          "operation": {
+            "$ref": "#/$defs/shared_operation"
+          }
+        }
+      }
     }
   ],
   "$defs": {
     "operation": {
+      "enum": [
+        "describe",
+        "status",
+        "install",
+        "verify",
+        "doctor",
+        "repair",
+        "backup",
+        "update",
+        "rollback",
+        "suspend",
+        "resume",
+        "kill",
+        "uninstall"
+      ]
+    },
+    "shared_operation": {
       "enum": [
         "describe",
         "status",

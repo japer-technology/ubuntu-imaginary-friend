@@ -64,12 +64,12 @@
   "source_repository": "japer-technology/ubuntu-zombie",
   "sources": [
     {
-      "object": "90652d35d0349e4f8447196bf32b841445ce1335",
+      "object": "c9915e996f182112dbf3ad620b8292c68afda159",
       "source_path": "products/imaginary-friend",
       "target_path": "."
     },
     {
-      "object": "79a7fdfbb258d0c04a361e66c6f0981d0775ca09",
+      "object": "745c4ff8da64360e409c13fe08b0a296814f8f8b",
       "source_path": "family/schemas",
       "target_path": "family/schemas"
     },
@@ -79,5 +79,5 @@
       "target_path": "LICENSE"
     }
   ],
-  "standalone_tree": "ad2446dfc2bb743b91780aa1e284261ca89c3574"
+  "standalone_tree": "369da812a639f364ab14707511b073b6f486c381"
 }
