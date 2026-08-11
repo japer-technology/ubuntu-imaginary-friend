@@ -5,6 +5,9 @@ access only to its own state and explicitly nominated workspaces. It is an
 independent product: it does not import Ubuntu Zombie, share its credentials,
 or inherit its root authority.
 
+> [!WARNING]
+> This is pre-alpha. It is not yet conformant or safe for real execution.
+
 The standalone source and independent release machinery are implemented.
 Admission to Ubuntu Zombie's production family catalogue remains gated on the
 manager, disposable-VM, co-installation, and release-verification evidence
